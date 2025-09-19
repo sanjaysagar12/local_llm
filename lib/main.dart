@@ -1,122 +1,234 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:flutter_gemma/core/model.dart';
+import 'dart:io' show Platform;
 
 void main() {
-  runApp(const MyApp());
+  runApp(const GemmaApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class GemmaApp extends StatelessWidget {
+  const GemmaApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Flutter Gemma GGUF Chat',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        primarySwatch: Colors.blue,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const GemmaHomePage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class GemmaHomePage extends StatefulWidget {
+  const GemmaHomePage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<GemmaHomePage> createState() => _GemmaHomePageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _GemmaHomePageState extends State<GemmaHomePage> {
+  final TextEditingController _textController = TextEditingController();
+  final List<String> _messages = [];
 
-  void _incrementCounter() {
+  InferenceModel? _model;
+  InferenceChat? _chat; // Changed from Conversation to InferenceChat
+  bool _isLoadingModel = false;
+  bool _isGenerating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeModel();
+  }
+
+  Future<void> _initializeModel() async {
+    setState(() => _isLoadingModel = true);
+    
+    try {
+      // Log platform information for debugging
+      print('Platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}');
+      
+      // Check if we're running on a supported platform (Android or iOS)
+      if (!Platform.isAndroid && !Platform.isIOS) {
+        throw Exception('Platform not supported. Flutter Gemma plugin currently only supports Android and iOS.');
+      }
+      
+      final gemma = FlutterGemmaPlugin.instance;
+      final modelManager = gemma.modelManager;
+
+      // Check plugin initialization
+      print('Plugin instance: $gemma');
+      print('Model manager: $modelManager');
+      
+      // Verify model URL is accessible
+      const modelUrl = 'https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-IQ4_NL.gguf';
+      print('Attempting to download model from: $modelUrl');
+      
+      // Download GGUF model from network and install it once
+      await modelManager.downloadModelFromNetwork(modelUrl);
+      print('Model downloaded successfully');
+      
+      // Create the model instance with more explicit parameters and error handling
+      print('Creating model instance...');
+      _model = await gemma.createModel(
+        modelType: ModelType.gemmaIt,
+        maxTokens: 512,
+        // Remove the PreferredBackend parameter since it's causing issues
+        // preferredBackend: PreferredBackend.cpu,
+      );
+      print('Model instance created: $_model');
+      
+      // Create conversation chat instance
+      _chat = await _model!.createChat();
+      print('Chat instance created: $_chat');
+
+      setState(() {
+        _isLoadingModel = false;
+      });
+    } catch (e, stackTrace) {
+      setState(() => _isLoadingModel = false);
+      print('Model initialization error: $e');
+      print('Stack trace: $stackTrace');
+      _showSnackBar('Failed to load model: ${e.toString()}');
+    }
+  }
+
+  Future<void> _sendMessage() async {
+    if (_textController.text.isEmpty || _isGenerating || _chat == null) return;
+
+    final userMessage = _textController.text.trim();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _messages.add('You: $userMessage');
+      _textController.clear();
+      _isGenerating = true;
     });
+
+    try {
+      await _chat!.addQueryChunk(Message.text(text: userMessage, isUser: true));
+
+      // Generate response from model (async streaming is also possible)
+      ModelResponse response = await _chat!.generateChatResponse();
+
+      if (response is TextResponse) {
+        setState(() {
+          _messages.add('Gemma: ${response.token}');
+          _isGenerating = false;
+        });
+      } else {
+        setState(() {
+          _messages.add('Gemma: [Unsupported response type]');
+          _isGenerating = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _messages.add('Error: $e');
+        _isGenerating = false;
+      });
+    }
+  }
+
+  void _showSnackBar(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text)),
+    );
+  }
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    
+    try {
+      // Close resources safely with null checks
+      if (_chat?.session != null) {
+        _chat!.session.close();
+      }
+      
+      if (_model != null) {
+        _model!.close();
+      }
+    } catch (e) {
+      print('Error during resource cleanup: $e');
+    }
+    
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Flutter Gemma GGUF Chat'),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+      body: _isLoadingModel
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: const [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Loading Gemma model...'),
+                  Text('This may take a while on first run'),
+                ],
+              ),
+            )
+          : Column(
+              children: [
+                Expanded(
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(8),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message = _messages[index];
+                      final isUser = message.startsWith('You:');
+                      return Align(
+                        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isUser ? Colors.blue.shade100 : Colors.grey.shade300,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            message,
+                            style: const TextStyle(fontSize: 16),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                if (_isGenerating) const LinearProgressIndicator(),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _textController,
+                          enabled: !_isGenerating,
+                          decoration: const InputDecoration(
+                            hintText: 'Type your message',
+                            border: OutlineInputBorder(),
+                          ),
+                          onSubmitted: (_) => _sendMessage(),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        icon: const Icon(Icons.send),
+                        onPressed: _isGenerating ? null : _sendMessage,
+                      ),
+                    ],
+                  ),
+                )
+              ],
             ),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
